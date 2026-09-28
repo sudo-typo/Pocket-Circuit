@@ -198,12 +198,18 @@ async function main() {
         let prevS = 0;
         let totalDist = 0;
         let ticks = 0;
+        let sumAbsLateral = 0;
+        let maxAbsLateral = 0;
         const maxTicks = 90 * 60; // 90s safety cap
 
         while (ticks < maxTicks) {
           const st = window.__pc.getState();
-          // Simple proportional steer-to-centerline driver.
-          const steer = Math.max(-1, Math.min(1, -st.kart.lateral / 3.0));
+          // Simple proportional steer-to-centerline driver. Gain of 0.5
+          // (steer saturates to +-1 at just 0.5m of lateral error) — tuned
+          // so this driver actually tracks the centerline tightly on the
+          // 2.2m-half-width track, rather than drifting into the soft-wall
+          // margin and relying on the wall to hold it there.
+          const steer = Math.max(-1, Math.min(1, -st.kart.lateral / 0.5));
           window.__pc.setInput({ steer });
           window.__pc.step(1);
           ticks++;
@@ -211,6 +217,8 @@ async function main() {
           const st2 = window.__pc.getState();
           const hw = st2.track.halfWidthAt(st2.kart.s);
           if (Math.abs(st2.kart.lateral) > hw + 0.75) leftTrack = true;
+          sumAbsLateral += Math.abs(st2.kart.lateral);
+          maxAbsLateral = Math.max(maxAbsLateral, Math.abs(st2.kart.lateral));
 
           if (st2.kart.airborne) sawAirborne = true;
           if (sawAirborne && !st2.kart.airborne && st2.kart.y === 0) landedAfterAirborne = true;
@@ -233,6 +241,8 @@ async function main() {
           sawAirborne,
           landedAfterAirborne,
           leftTrack,
+          meanAbsLateral: sumAbsLateral / ticks,
+          maxAbsLateral,
           lapTimeSeconds: ticks * dt,
         };
       });
@@ -242,6 +252,16 @@ async function main() {
         `dist=${result.totalDist.toFixed(1)}/${result.trackLength.toFixed(1)}m`);
       record('d. never leaves track beyond tolerance', !result.leftTrack);
       record('d. ramp hop: airborne then lands cleanly', result.sawAirborne && result.landedAfterAirborne);
+
+      // Guard: the driver must actually track the centerline (proof the
+      // sign convention is correct — negative feedback, not positive),
+      // not just survive by riding the soft-wall margin. wallMargin=0.85,
+      // halfWidth=2.2, so the margin zone starts at |lateral| > 1.35.
+      const wallMarginStart = 2.2 - 0.85;
+      record('centerline driver: mean |lateral| < 0.3m over the full lap', result.meanAbsLateral < 0.3,
+        `mean=${result.meanAbsLateral.toFixed(3)}m`);
+      record('centerline driver: max |lateral| never reaches the soft-wall margin', result.maxAbsLateral < wallMarginStart,
+        `max=${result.maxAbsLateral.toFixed(3)}m, wall margin starts at ${wallMarginStart.toFixed(2)}m`);
 
       lapTimeSeconds = result.lapTimeSeconds;
       const lapOk = lapTimeSeconds >= 25 && lapTimeSeconds <= 50; // generous band, reported exactly
@@ -263,7 +283,7 @@ async function main() {
         while (guard < 20000) {
           const s = window.__pc.getState();
           if (s.kart.s >= targetS) break;
-          const steer = Math.max(-1, Math.min(1, -s.kart.lateral / 3.0));
+          const steer = Math.max(-1, Math.min(1, -s.kart.lateral / 0.5));
           window.__pc.setInput({ steer });
           window.__pc.step(1);
           guard++;
@@ -281,6 +301,29 @@ async function main() {
       record('ramp approach: kart is on screen', vis.onScreen,
         `screen=(${vis.screenX.toFixed(0)},${vis.screenY.toFixed(0)})`);
       record('ramp approach: kart is the first raycast hit (not occluded)', vis.firstHitIsKart);
+    });
+
+    // ---- Guard: Track.project()'s lateral sign convention. From dead
+    // center on a straight (fresh reset: lateral=0, heading=local tangent),
+    // a brief steer=+1 (confirmed elsewhere to turn the kart right on
+    // screen) must make `lateral` go POSITIVE — i.e. lateral > 0 means
+    // "right of centerline", the same side steer > 0 turns toward. This is
+    // the single source-of-truth convention every consumer (soft walls,
+    // hard clamp, ramp/curb placement, and later AI/lap code) depends on. ----
+    await withPage(browser, {}, async (page) => {
+      await page.goto(url('?test=1'));
+      await page.waitForFunction(() => window.__pc && window.__pc.ready);
+      const lateralResult = await page.evaluate(() => {
+        window.__pc.resetKart();
+        const startLateral = window.__pc.getState().kart.lateral;
+        window.__pc.setInput({ steer: 1 });
+        window.__pc.step(15); // 0.25s — short enough that track curvature doesn't confound it
+        const endLateral = window.__pc.getState().kart.lateral;
+        return { startLateral, endLateral };
+      });
+      record('a. steer=+1 from center makes lateral go positive (lateral>0 = right)',
+        lateralResult.startLateral === 0 && lateralResult.endLateral > 0.01,
+        `start=${lateralResult.startLateral.toFixed(4)}, end=${lateralResult.endLateral.toFixed(4)}`);
     });
 
     // ---- f. Touch steering (asserts on __pc.getInput().steer directly) ----
@@ -343,6 +386,122 @@ async function main() {
       await touchAt(rightHalfX, rightHalfY, 'touchEnd');
       record('f. touch on right half: steer stays 0', Math.abs(rightHalfSteer) < 0.01,
         `steer=${rightHalfSteer.toFixed(3)}`);
+    });
+
+    // ---- Guard: steer sign matches the ON-SCREEN turn direction, not
+    // just the numeric sign of input.steer. This is the regression guard
+    // for the real-iPad bug where sliding right visibly turned the kart
+    // left (input.steer was correctly positive, but the physics applied
+    // it backwards). "Turns right" is defined the same way a player looking
+    // at the screen would judge it: the kart's forward direction sweeps
+    // toward the chase camera's own world-space right vector — computed
+    // fresh from the live camera via __pc.getCameraRight(), never assumed
+    // as a fixed world axis, so this can't be fooled by a camera change
+    // that happens to compensate for a physics-sign regression (or vice
+    // versa). Runs on the ramp's flat lead-in, a straight stretch. ----
+    async function turnSign(page) {
+      // heading -> forward unit vector, matching Physics.step's own
+      // dx=sin(heading), dz=cos(heading) convention.
+      return page.evaluate(() => {
+        const before = window.__pc.getState().kart.heading;
+        const right = window.__pc.getCameraRight();
+        return { before, right };
+      });
+    }
+    function forwardVec(heading) { return { x: Math.sin(heading), z: Math.cos(heading) }; }
+    function dot2(a, b) { return a.x * b.x + a.z * b.z; }
+
+    await withPage(browser, {}, async (page) => {
+      await page.goto(url('?test=1'));
+      await page.waitForFunction(() => window.__pc && window.__pc.ready);
+
+      // Drive onto the ramp's straight lead-in and let the chase camera
+      // settle behind the kart before measuring, on both a real (0/0)
+      // heading start and mid-track — reuse the ramp approach point since
+      // it's a known straight stretch.
+      async function driveToStraightSection() {
+        await page.evaluate(() => {
+          window.__pc.resetKart();
+          window.__pc.clearInput();
+        });
+        await page.evaluate(() => {
+          const st = window.__pc.getState();
+          const targetS = st.track.rampS - 3;
+          let guard = 0;
+          while (guard < 20000) {
+            const s = window.__pc.getState();
+            if (s.kart.s >= (targetS < 0 ? targetS + st.track.length : targetS)) break;
+            const steer = Math.max(-1, Math.min(1, -s.kart.lateral / 0.5));
+            window.__pc.setInput({ steer });
+            window.__pc.step(1);
+            guard++;
+          }
+          window.__pc.setInput({ steer: 0 });
+        });
+        await page.waitForTimeout(250); // let the RAF-driven chase camera settle behind the kart
+      }
+
+      for (const [label, steerVal] of [['positive (right slide)', 1], ['negative (left slide)', -1]]) {
+        await driveToStraightSection();
+        const { before, right } = await turnSign(page);
+        await page.evaluate((s) => window.__pc.setInput({ steer: s }), steerVal);
+        await page.evaluate(() => window.__pc.step(30)); // 0.5s of physics, synchronous — no RAF/camera update in between
+        const after = await page.evaluate(() => window.__pc.getState().kart.heading);
+
+        const fBefore = forwardVec(before);
+        const fAfter = forwardVec(after);
+        const sweep = { x: fAfter.x - fBefore.x, z: fAfter.z - fBefore.z };
+        const rightComponent = dot2(sweep, right); // >0 means the forward vector swept toward camera-right
+
+        const expectRight = steerVal > 0;
+        const pass = expectRight ? rightComponent > 0.01 : rightComponent < -0.01;
+        record(`steer=${steerVal} (${label}) turns the kart toward the correct screen side`, pass,
+          `rightComponent=${rightComponent.toFixed(4)} (camera-right dot heading-sweep)`);
+      }
+
+      // ---- Same check via a real touch gesture, not setInput() ----
+      await driveToStraightSection();
+      // driveToStraightSection() leaves a setInput({steer:0}) override
+      // active (used to hold the kart straight while it settles); clear it
+      // so the upcoming real touch gesture actually reaches the physics.
+      await page.evaluate(() => window.__pc.clearInput());
+      const { before: touchBefore, right: touchRight } = await turnSign(page);
+      const client = await page.context().newCDPSession(page);
+      async function touchAt(x, y, phase) {
+        await client.send('Input.dispatchTouchEvent', {
+          type: phase, touchPoints: phase === 'touchEnd' ? [] : [{ x, y }],
+        });
+      }
+      const leftX = 200, leftY = 400;
+      await touchAt(leftX, leftY, 'touchStart');
+      await touchAt(leftX + 60, leftY, 'touchMove'); // slide right
+      await page.waitForTimeout(500); // hold ~0.5s of real time, driven by the actual RAF loop
+      await touchAt(leftX + 60, leftY, 'touchEnd');
+      const touchAfter = await page.evaluate(() => window.__pc.getState().kart.heading);
+
+      const touchSweep = {
+        x: forwardVec(touchAfter).x - forwardVec(touchBefore).x,
+        z: forwardVec(touchAfter).z - forwardVec(touchBefore).z,
+      };
+      const touchRightComponent = dot2(touchSweep, touchRight);
+      record('real touch: slide right turns the kart right on screen', touchRightComponent > 0.005,
+        `rightComponent=${touchRightComponent.toFixed(4)}`);
+
+      // ---- Same check via the real keyboard fallback (Right arrow) ----
+      await driveToStraightSection();
+      await page.evaluate(() => window.__pc.clearInput());
+      const { before: keyBefore, right: keyRight } = await turnSign(page);
+      await page.keyboard.down('ArrowRight');
+      await page.waitForTimeout(500); // hold ~0.5s of real time, driven by the actual RAF loop
+      await page.keyboard.up('ArrowRight');
+      const keyAfter = await page.evaluate(() => window.__pc.getState().kart.heading);
+      const keySweep = {
+        x: forwardVec(keyAfter).x - forwardVec(keyBefore).x,
+        z: forwardVec(keyAfter).z - forwardVec(keyBefore).z,
+      };
+      const keyRightComponent = dot2(keySweep, keyRight);
+      record('keyboard: Right arrow turns the kart right on screen', keyRightComponent > 0.005,
+        `rightComponent=${keyRightComponent.toFixed(4)}`);
     });
 
     // ---- Overhead screenshot + Guard A: the road ribbon must actually

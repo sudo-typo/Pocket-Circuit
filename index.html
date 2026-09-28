@@ -437,10 +437,19 @@
           t = Math.max(0, Math.min(1, t));
           const px = a.x + abx * t, pz = a.z + abz * t;
           const s = samples[i0].s + t * (samples[i1].s - samples[i0].s);
-          // signed lateral via cross product of tangent x (pos-point)
+          // Signed lateral offset. Convention (the single source of truth
+          // for every consumer — soft walls, hard clamp, ramp/curb
+          // placement, and later AI): lateral > 0 means RIGHT of the
+          // centerline as seen while driving forward along increasing s —
+          // the same side `steer > 0` turns the kart toward. Concretely,
+          // the "right" perpendicular is `(tangent.z, 0, -tangent.x)`, and
+          // this formula is exactly `dot(pos - point, right)`; any code
+          // that reconstructs a lateral offset back into a world position
+          // must use that same right vector (`point + right*lateral`) to
+          // stay consistent with this sign.
           const tangent = samples[i0].tangent;
           const dx = worldPos.x - px, dz = worldPos.z - pz;
-          const lateral = tangent.x * dz - tangent.z * dx; // right-hand sign convention
+          const lateral = tangent.x * dz - tangent.z * dx;
           const distSq = dx * dx + dz * dz;
           return { s, lateral, distSq, point: new THREE.Vector3(px, 0, pz), tangent };
         }
@@ -679,11 +688,24 @@
         kart.speed = Math.min(kart.speed, st.topSpeed);
 
         // --- Steering: yaw rate scaled by speed (slow = tighter turning,
-        // near top speed = gentler turning), reduced further while airborne. ---
+        // near top speed = gentler turning), reduced further while airborne.
+        //
+        // Sign convention: position integrates as
+        //   dx = sin(heading)*speed, dz = cos(heading)*speed
+        // so heading=0 is world +Z, and INCREASING heading sweeps the
+        // forward vector from +Z toward +X. Given how the chase/top
+        // cameras are built (world up = +Y, camera behind/above looking
+        // along the kart's forward vector), world +X is the camera's LEFT,
+        // not its right — so a naive `heading += steer` turns the kart
+        // left on screen when steer is positive. We want the documented
+        // contract (`steer: -1..1`, positive = right) to mean "turns right
+        // as seen from the chase camera", so the steer contribution is
+        // subtracted here. (Confirmed on a real iPad: this was inverted
+        // before — sliding the touch slider right turned the kart left.) ---
         const speedForTurn = Math.min(1, kart.speed / Math.max(1e-3, st.topSpeed));
         const turnRate = st.turnRateMax * (1 - speedForTurn * (1 - st.turnRateMinFactor));
         const airborneFactor = kart.airborne ? 0.35 : 1.0;
-        kart.heading += input.steer * turnRate * airborneFactor * dt;
+        kart.heading -= input.steer * turnRate * airborneFactor * dt;
 
         // --- Grip: in this simple arcade model velocity is always exactly
         // speed-along-heading (no separate slip vector), so `st.grip` has
@@ -719,8 +741,8 @@
           const t = penetration / CONFIG.track.wallMargin; // 0..1 how deep into the margin
           const sign = Math.sign(kart.lateral);
           const tangent = proj.tangent;
-          // Right-hand perpendicular matching the project() lateral sign
-          // convention (lateral = tangent.x*dz - tangent.z*dx), so that
+          // Perpendicular matching Track.project()'s lateral convention
+          // (lateral > 0 = right of centerline), so that
           // pos = point + right*lateral round-trips correctly.
           const right = new THREE.Vector3(-tangent.z, 0, tangent.x);
 
@@ -872,7 +894,7 @@
         const { pitchRad = 0, lateralOffset = 0, yOffset = 0, roughness = 0.8, metalness = 0 } = opts;
         const sample = Track.sampleAtS(sCenter);
         const tangent = sample.tangent;
-        const right = new THREE.Vector3(-tangent.z, 0, tangent.x); // matches Track.project()'s lateral sign
+        const right = new THREE.Vector3(-tangent.z, 0, tangent.x); // matches Track.project()'s lateral sign (right > 0)
         const yaw = Math.atan2(tangent.x, tangent.z);
 
         const geo = new THREE.BoxGeometry(size.x, size.y, size.z);
@@ -929,7 +951,7 @@
           if (inGap) { justBrokeRun = true; continue; }
 
           const tangent = smp.tangent;
-          const right = new THREE.Vector3(-tangent.z, 0, tangent.x);
+          const right = new THREE.Vector3(-tangent.z, 0, tangent.x); // matches Track.project()'s lateral sign (right > 0)
           const hw = CONFIG.track.halfWidthDefault;
           const left = smp.point.clone().addScaledVector(right, -hw);
           const rightP = smp.point.clone().addScaledVector(right, hw);
@@ -984,7 +1006,7 @@
 
           const sample = Track.sampleAtS(s);
           const tangent = sample.tangent;
-          const right = new THREE.Vector3(-tangent.z, 0, tangent.x);
+          const right = new THREE.Vector3(-tangent.z, 0, tangent.x); // matches Track.project()'s lateral sign (right > 0)
           const yaw = Math.atan2(tangent.x, tangent.z);
           const quat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
           const list = segIndex % 2 === 0 ? redTransforms : whiteTransforms;
@@ -1529,6 +1551,16 @@
             Rendering.render();
             const r = Rendering.renderer.info.render;
             return { calls: r.calls, triangles: r.triangles };
+          },
+          // The current chase camera's world-space "right" direction —
+          // lets a test define "turns right" the same way a person looking
+          // at the screen would, from the camera itself, rather than by
+          // hardcoding a world-axis convention that could silently flip if
+          // the camera or heading integration ever changes.
+          getCameraRight() {
+            const right = new THREE.Vector3(1, 0, 0);
+            right.transformDirection(Rendering.camera.matrixWorld);
+            return { x: right.x, y: right.y, z: right.z };
           },
         };
       }
