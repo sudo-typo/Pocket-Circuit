@@ -1,0 +1,1538 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+<title>Pocket Circuit</title>
+<style>
+  :root {
+    color-scheme: dark;
+  }
+
+  html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    background: #14100c;
+    overflow: hidden;
+    overscroll-behavior: none;
+    touch-action: none;
+    -webkit-user-select: none;
+    user-select: none;
+    -webkit-touch-callout: none;
+  }
+
+  * {
+    box-sizing: border-box;
+    -webkit-tap-highlight-color: transparent;
+  }
+
+  #game-root {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+  }
+
+  canvas#c {
+    display: block;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+  }
+
+  /* ---------- HUD ---------- */
+  #hud {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    font-family: -apple-system, "Helvetica Neue", Arial, sans-serif;
+    color: #fff8ec;
+    text-shadow: 0 1px 3px rgba(0, 0, 0, 0.6);
+  }
+
+  #fps {
+    position: fixed;
+    top: 8px;
+    left: 8px;
+    padding: 3px 8px;
+    background: rgba(0, 0, 0, 0.45);
+    border-radius: 6px;
+    font-size: 13px;
+    font-variant-numeric: tabular-nums;
+    display: none;
+    z-index: 20;
+  }
+
+  #fps.visible { display: block; }
+
+  /* ---------- Steering slider ---------- */
+  #steer-zone {
+    position: fixed;
+    left: 0;
+    top: 0;
+    width: 50%;
+    height: 100%;
+    pointer-events: auto;
+    z-index: 10;
+  }
+
+  #steer-vis {
+    position: fixed;
+    pointer-events: none;
+    display: none;
+    z-index: 11;
+  }
+
+  #steer-vis .track {
+    position: absolute;
+    width: 220px;
+    height: 64px;
+    left: -110px;
+    top: -32px;
+    border-radius: 32px;
+    background: rgba(255, 255, 255, 0.12);
+    border: 2px solid rgba(255, 255, 255, 0.35);
+  }
+
+  #steer-vis .knob {
+    position: absolute;
+    width: 52px;
+    height: 52px;
+    left: -26px;
+    top: -26px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.55);
+    border: 2px solid rgba(255, 255, 255, 0.8);
+  }
+
+  /* ---------- Overlays ---------- */
+  .overlay {
+    position: fixed;
+    inset: 0;
+    display: none;
+    align-items: center;
+    justify-content: center;
+    flex-direction: column;
+    gap: 14px;
+    text-align: center;
+    background: #14100c;
+    color: #fff8ec;
+    font-family: -apple-system, "Helvetica Neue", Arial, sans-serif;
+    z-index: 100;
+    padding: 24px;
+  }
+
+  .overlay.visible { display: flex; }
+
+  .overlay .icon { font-size: 64px; line-height: 1; }
+  .overlay h1 { font-size: 22px; margin: 0; font-weight: 600; }
+  .overlay p { font-size: 15px; margin: 0; opacity: 0.8; max-width: 320px; }
+
+  /* rotate-device icon: a simple css phone rotating */
+  .rotate-icon {
+    width: 56px;
+    height: 34px;
+    border: 4px solid #fff8ec;
+    border-radius: 6px;
+    position: relative;
+    animation: rotate-hint 1.6s ease-in-out infinite;
+  }
+
+  @keyframes rotate-hint {
+    0%, 100% { transform: rotate(0deg); }
+    50% { transform: rotate(90deg); }
+  }
+
+  /* ---------- future HUD sections (menus, results, etc.) ---------- */
+  /* Slice 2 will add countdown + lap/timer HUD elements here. */
+  /* Slice 5/6 will add title/difficulty/character menu overlays here. */
+  /* Slice 7 will add item button + item HUD here. */
+</style>
+</head>
+<body>
+
+  <div id="game-root">
+    <canvas id="c"></canvas>
+
+    <div id="hud">
+      <div id="fps">-- fps</div>
+      <!-- Slice 2+: lap counter, timer, position, final-lap banner go here. -->
+      <!-- Slice 3: drift button. Slice 7: item button. -->
+    </div>
+
+    <!-- Left-half touch zone for the steering slider (Section 3 INPUT owns this). -->
+    <div id="steer-zone"></div>
+    <div id="steer-vis">
+      <div class="track"></div>
+      <div class="knob"></div>
+    </div>
+
+    <div id="rotate-overlay" class="overlay">
+      <div class="rotate-icon"></div>
+      <h1>Turn your iPad sideways</h1>
+      <p>Pocket Circuit plays in landscape.</p>
+    </div>
+
+    <div id="load-error-overlay" class="overlay">
+      <div class="icon">&#128268;</div>
+      <h1>Can't load the game</h1>
+      <p>Check your internet connection, then reload the page.</p>
+    </div>
+  </div>
+
+  <!-- Pinned three.js build via import map. Never inlined/vendored. -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.min.js"
+    }
+  }
+  </script>
+
+  <!--
+    Load-failure safety net: a static `import` failure (e.g. the CDN is
+    unreachable) kills the module silently with no error the page can
+    catch from outside. So the module script sets `window.__pcReady = true`
+    the moment it starts running, and this tiny classic script polls for
+    that flag; if it never shows up within a few seconds, we show the
+    friendly "can't load" screen instead of a blank page.
+  -->
+  <script>
+    window.__pcModuleStarted = false;
+    setTimeout(function () {
+      if (!window.__pcModuleStarted) {
+        var el = document.getElementById('load-error-overlay');
+        if (el) el.classList.add('visible');
+      }
+    }, 6000);
+  </script>
+
+  <script type="module">
+    // Mark that the module began executing. Any error thrown after this
+    // line (including a failed dynamic import below) is caught explicitly
+    // and shown as the same friendly error screen.
+    window.__pcModuleStarted = true;
+
+    let THREE;
+    try {
+      THREE = await import('three');
+    } catch (err) {
+      console.error('Failed to load three.js', err);
+      document.getElementById('load-error-overlay').classList.add('visible');
+      throw err;
+    }
+
+    // =========================================================================
+    // 1. CONFIG & TUNING
+    // =========================================================================
+    // Every tunable number for the whole game lives here. Later slices add
+    // their own sub-objects (DRIFT, ITEMS, AI, DIFFICULTY, ...) but never
+    // scatter magic numbers through other sections.
+    const CONFIG = {
+      physics: {
+        hz: 60,                    // fixed physics tick rate
+        maxCatchUpSteps: 8,        // cap accumulator catch-up per frame (avoid spiral of death)
+      },
+
+      // Default kart stats. Slice 6 will add a stats object per character;
+      // for Slice 1 there is only this single default kart.
+      defaultStats: {
+        // Tuned so a lap of the kitchen loop (~195m) takes ~35-40s at top
+        // speed: 195 / 5.3 ~= 37s. Small numbers because these are tiny
+        // karts racing across a kitchen counter, not full-size cars.
+        topSpeed: 5.3,       // world units / second
+        accel: 4.0,          // units/s^2 toward topSpeed
+        brakeDecel: 6.0,     // units/s^2 when off throttle / reversing intent (unused w/ auto-accel, kept for later slices)
+        grip: 9.0,           // how fast velocity direction blends toward heading (1/s, higher = grippier)
+        weight: 1.0,         // relative mass, used by bumpers/kart-kart hits (later slices)
+        slipResist: 0.0,     // 0..1 resistance to slippery surfaces (Slice 9)
+        turnRateMax: 2.6,    // rad/s yaw rate at low speed
+        turnRateMinFactor: 0.35, // fraction of turnRateMax retained at top speed
+        steerSmoothing: 10,  // 1/s smoothing applied to raw input steer value
+      },
+
+      // Every distance below is proportioned to the kart (see CONFIG.kart),
+      // not just the kart mesh: after Slice 1's review, the whole world —
+      // track width, ramp, walls, camera — was re-scaled together so a
+      // 0.6m kart reads sensibly against a ~4.5m-wide road instead of a
+      // 10.4m-wide one built for a full-size kart.
+      track: {
+        halfWidthDefault: 2.2,     // meters, half the drivable width (~7-8 kart-lengths wide)
+        wallMargin: 0.85,          // soft-wall zone starts this far inside the edge
+        wallPushStrength: 10,      // position nudge (m/s) back toward centerline inside margin
+        wallHeadingCorrection: 7.0, // max rad/s blending heading back toward the track tangent
+        wallHardTolerance: 0.12,   // meters beyond half-width the kart is hard-clamped at
+        sampleCount: 400,          // centerline samples for the projection table
+      },
+
+      ramp: {
+        // Sink-gap jump: kart gets a vertical launch velocity when crossing
+        // the ramp trigger zone, then falls under gravity until it lands.
+        // Apex height (v^2/2g) and hang time are unrelated to the ramp
+        // mesh's own height below — the mesh is just a visual cue.
+        launchSpeed: 7.2,      // m/s vertical velocity applied at ramp trigger
+        gravity: -22,          // m/s^2
+        triggerHalfLength: 0.5, // +/- s-distance around ramp center that triggers a hop
+        // ---- Visual-only geometry (must bracket the trigger zone above) ----
+        gapHalfMultiplier: 1.0, // gap in the track ribbon = triggerHalfLength * this (1.0 = lines up exactly with the trigger)
+        riseLength: 1.3,       // length (m) of the sloped take-off ramp, just before the gap
+        riseHeight: 0.22,      // height (m) the take-off ramp climbs to at the gap edge
+        landingPadLength: 2.4, // length (m) of the flat, colored landing pad after the gap (covers the hop's landing point)
+      },
+
+      camera: {
+        fov: 66,             // wider than a default 50-58deg so the kart reads small and the next turn is visible
+        distance: 2.1,       // behind kart, in meters (kart is tiny — see CONFIG.kart.scale)
+        height: 1.7,
+        lookHeight: 0.15,
+        lookAheadDistance: 3.5, // look this far ahead of the kart (along its heading) so upcoming turns are visible
+        followLerp: 5.5,    // position smoothing (1/s)
+        lookLerp: 7.0,       // look-at smoothing (1/s)
+      },
+
+      input: {
+        sliderRangePx: 90,   // horizontal px for full deflection (-1..1)
+        smoothing: 14,       // 1/s smoothing applied on top of per-section smoothing
+        keyboardSteerRate: 3.2, // how fast keyboard steer ramps to +-1 (1/s)
+      },
+
+      // The kart mesh is authored at a 2.6m reference length, then uniformly
+      // scaled down to `scale * 2.6` meters so it reads as roughly 8-10
+      // kart-lengths/second at the default top speed ("tiny karts race
+      // across a giant kitchen counter" — the counter and its props stay
+      // at full size; only the kart shrinks).
+      kart: {
+        scale: 0.23,
+      },
+
+      render: {
+        pixelRatioCap: 2,
+        shadowMapSize: 1024,
+        // ?lowfx=1 in the URL drops render cost for slower iPads: shadows
+        // are disabled entirely, pixel ratio is capped at 1, and purely
+        // decorative geometry (backsplash grout, extra fruit, dense edge
+        // bumpers) is skipped or thinned out. See Rendering (Section 8),
+        // which reads `LOWFX` once at startup and branches on it.
+      },
+
+      // ---- Future-slice config placeholders (kept empty on purpose) ----
+      drift: {},      // Slice 3
+      items: {},      // Slice 7
+      ai: {},         // Slice 4/5
+      difficulty: {}, // Slice 5
+      audio: {},      // Slice 11
+    };
+
+    // =========================================================================
+    // 2. TRACK DATA
+    // =========================================================================
+    // A track is one data object: a centerline curve, a width profile, and
+    // placeholder arrays for features later slices fill in. Everything
+    // (physics, AI, laps) projects world position onto this centerline via
+    // Track.project(). No section other than this one builds curves.
+    const Track = (() => {
+      // Control points for the kitchen counter loop (closed CatmullRom curve).
+      // Units are meters. Laid out as a rounded rectangle-ish loop around
+      // counter props, with a gap on one side representing the sink, crossed
+      // by a jump ramp. Sized so lap length / topSpeed ~= 36s.
+      const controlPoints = [
+        new THREE.Vector3(0, 0, 22),
+        new THREE.Vector3(16, 0, 26),
+        new THREE.Vector3(30, 0, 18),
+        new THREE.Vector3(34, 0, 2),
+        new THREE.Vector3(28, 0, -14),
+        new THREE.Vector3(14, 0, -22),   // approach to sink gap
+        new THREE.Vector3(0, 0, -22),    // sink gap ramp take-off (s marked below)
+        new THREE.Vector3(-14, 0, -22),  // sink gap landing
+        new THREE.Vector3(-28, 0, -14),
+        new THREE.Vector3(-34, 0, 2),
+        new THREE.Vector3(-30, 0, 18),
+        new THREE.Vector3(-16, 0, 26),
+      ];
+
+      const curve = new THREE.CatmullRomCurve3(controlPoints, true, 'catmullrom', 0.5);
+
+      // Width profile: constant except a couple of gentle pinches, expressed
+      // as a function of normalized curve parameter u (0..1). Keeps the API
+      // simple; a later track could vary this more.
+      function halfWidthAtU(u) {
+        return CONFIG.track.halfWidthDefault;
+      }
+
+      // ---- Precompute a sampled centerline table ----
+      // Each sample: { u, point, tangent, s (cumulative distance) }
+      const N = CONFIG.track.sampleCount;
+      const samples = [];
+      {
+        let cum = 0;
+        let prevPoint = curve.getPointAt(0);
+        for (let i = 0; i <= N; i++) {
+          const u = i / N;
+          const point = i === 0 ? prevPoint : curve.getPointAt(u);
+          const tangent = curve.getTangentAt(u).normalize();
+          if (i > 0) cum += point.distanceTo(prevPoint);
+          samples.push({ u, point: point.clone(), tangent: tangent.clone(), s: cum });
+          prevPoint = point;
+        }
+      }
+      const length = samples[samples.length - 1].s;
+
+      // Ramp / sink gap: locate the s-distance nearest control point index 6
+      // (the take-off point at (0,0,-22)) so physics + rendering agree on it.
+      const rampPoint = new THREE.Vector3(0, 0, -22);
+      let rampS = 0;
+      {
+        let best = Infinity;
+        for (const smp of samples) {
+          const d = smp.point.distanceTo(rampPoint);
+          if (d < best) { best = d; rampS = smp.s; }
+        }
+      }
+
+      // Placeholder feature arrays for later slices. Populated with nothing
+      // in Slice 1; Slice 3 fills boostPads, Slice 7 fills itemBoxes, Slice 9
+      // fills surfaces (currently one big 'normal' region), and Slice 2
+      // fills lapEvents (checkpoints).
+      const boostPads = [];
+      const itemBoxes = [];
+      const surfaces = [{ startS: 0, endS: length, type: 'normal' }];
+      const lapEvents = [];
+
+      // Binary-search helper: find sample index with the largest s <= target,
+      // wrapping around the closed loop.
+      function findSampleIndex(sMod) {
+        let lo = 0, hi = samples.length - 1;
+        while (lo < hi - 1) {
+          const mid = (lo + hi) >> 1;
+          if (samples[mid].s <= sMod) lo = mid; else hi = mid;
+        }
+        return lo;
+      }
+
+      /**
+       * Project any world XZ position onto the centerline.
+       * Returns { s, lateral, segmentIndex, point, tangent, halfWidth }.
+       * `lateral` is signed distance from centerline (+ to the right of travel).
+       */
+      function project(worldPos) {
+        // Coarse pass over all samples to find the closest one, then refine
+        // against the two neighboring segments for a smoother s/lateral.
+        let bestIdx = 0;
+        let bestDistSq = Infinity;
+        for (let i = 0; i < samples.length - 1; i++) {
+          const d2 = samples[i].point.distanceToSquared(worldPos);
+          if (d2 < bestDistSq) { bestDistSq = d2; bestIdx = i; }
+        }
+
+        // Refine using the closest of the two segments touching bestIdx.
+        function segProject(i0, i1) {
+          const a = samples[i0].point, b = samples[i1].point;
+          const abx = b.x - a.x, abz = b.z - a.z;
+          const apx = worldPos.x - a.x, apz = worldPos.z - a.z;
+          const abLenSq = abx * abx + abz * abz || 1e-6;
+          let t = (apx * abx + apz * abz) / abLenSq;
+          t = Math.max(0, Math.min(1, t));
+          const px = a.x + abx * t, pz = a.z + abz * t;
+          const s = samples[i0].s + t * (samples[i1].s - samples[i0].s);
+          // signed lateral via cross product of tangent x (pos-point)
+          const tangent = samples[i0].tangent;
+          const dx = worldPos.x - px, dz = worldPos.z - pz;
+          const lateral = tangent.x * dz - tangent.z * dx; // right-hand sign convention
+          const distSq = dx * dx + dz * dz;
+          return { s, lateral, distSq, point: new THREE.Vector3(px, 0, pz), tangent };
+        }
+
+        const iPrev = (bestIdx - 1 + samples.length - 1) % (samples.length - 1);
+        const candA = segProject(bestIdx, bestIdx + 1 <= samples.length - 1 ? bestIdx + 1 : 0);
+        const candB = segProject(iPrev, bestIdx);
+        const best = candA.distSq <= candB.distSq ? candA : candB;
+
+        return {
+          s: best.s,
+          lateral: best.lateral,
+          segmentIndex: bestIdx,
+          point: best.point,
+          tangent: best.tangent,
+          halfWidth: halfWidthAtU(best.s / length),
+        };
+      }
+
+      /** Sample centerline point/tangent at arbitrary s (wraps). */
+      function sampleAtS(s) {
+        let sMod = s % length;
+        if (sMod < 0) sMod += length;
+        const i = findSampleIndex(sMod);
+        const a = samples[i], b = samples[(i + 1) % samples.length];
+        const segLen = (b.s - a.s + length) % length || 1e-6;
+        let t = (sMod - a.s) / segLen;
+        t = Math.max(0, Math.min(1, t));
+        const point = new THREE.Vector3().lerpVectors(a.point, b.point, t);
+        const tangent = new THREE.Vector3().lerpVectors(a.tangent, b.tangent, t).normalize();
+        return { point, tangent, halfWidth: halfWidthAtU(sMod / length) };
+      }
+
+      function isNearRamp(s) {
+        let sMod = s % length; if (sMod < 0) sMod += length;
+        let d = Math.abs(sMod - rampS);
+        d = Math.min(d, length - d);
+        return d <= CONFIG.ramp.triggerHalfLength;
+      }
+
+      // Height (m) of the static take-off ramp mesh at s, 0 everywhere
+      // except the sloped approach just before the gap. Physics adds this
+      // to the kart's y while it's still on the ground, so the kart visibly
+      // rides up the ramp instead of clipping through it; once airborne
+      // (Physics.step launches it exactly at the ramp's peak, s = rampS -
+      // gapHalf), the vertical hop alone governs height. Rendering's
+      // buildRamp() uses these same CONFIG.ramp values, so the mesh and
+      // this height function always agree.
+      function rampApproachHeightAt(s) {
+        const r = CONFIG.ramp;
+        const gapHalfLocal = r.triggerHalfLength * r.gapHalfMultiplier;
+        // Signed distance from rampS, wrapped to (-length/2, length/2].
+        let delta = ((s - rampS + length / 2) % length + length) % length - length / 2;
+        const frontDelta = -gapHalfLocal;          // ramp's peak, right at the gap edge
+        const backDelta = frontDelta - r.riseLength; // ramp's foot, ground level
+        if (delta < backDelta || delta > frontDelta) return 0;
+        const t = (delta - backDelta) / (frontDelta - backDelta || 1e-6);
+        return t * r.riseHeight;
+      }
+
+      return {
+        curve,
+        samples,
+        length,
+        rampS,
+        controlPoints,
+        boostPads,
+        itemBoxes,
+        surfaces,
+        lapEvents,
+        halfWidthAtU,
+        project,
+        sampleAtS,
+        isNearRamp,
+        rampApproachHeightAt,
+      };
+    })();
+
+    // =========================================================================
+    // 3. INPUT
+    // =========================================================================
+    // Touch slider (left half) + keyboard fallback, both reduced to the same
+    // { steer, drift, item } object each frame via Input.getFrame().
+    const Input = (() => {
+      let steerRaw = 0;      // -1..1, before smoothing, from whichever source is active
+      let steerSmoothed = 0;
+
+      // ---- Touch slider state ----
+      let activeTouchId = null;
+      let touchCenterX = 0;
+      let touchCenterY = 0;
+      const zoneEl = document.getElementById('steer-zone');
+      const visEl = document.getElementById('steer-vis');
+      const knobEl = visEl.querySelector('.knob');
+
+      function isLeftHalf(x) {
+        return x < window.innerWidth * 0.5;
+      }
+
+      function showVis(x, y) {
+        visEl.style.left = x + 'px';
+        visEl.style.top = y + 'px';
+        visEl.style.display = 'block';
+      }
+      function hideVis() {
+        visEl.style.display = 'none';
+        knobEl.style.transform = 'translate(0,0)';
+      }
+
+      function onTouchStart(e) {
+        for (const t of e.changedTouches) {
+          if (activeTouchId !== null) continue; // only track first touch on left half
+          if (!isLeftHalf(t.clientX)) continue;
+          activeTouchId = t.identifier;
+          touchCenterX = t.clientX;
+          touchCenterY = t.clientY;
+          showVis(touchCenterX, touchCenterY);
+        }
+      }
+      function onTouchMove(e) {
+        for (const t of e.changedTouches) {
+          if (t.identifier !== activeTouchId) continue;
+          const dx = t.clientX - touchCenterX;
+          const range = CONFIG.input.sliderRangePx;
+          steerRaw = Math.max(-1, Math.min(1, dx / range));
+          const clampedDx = Math.max(-range, Math.min(range, dx));
+          knobEl.style.transform = `translate(${clampedDx}px, 0px)`;
+        }
+      }
+      function onTouchEnd(e) {
+        for (const t of e.changedTouches) {
+          if (t.identifier !== activeTouchId) continue;
+          activeTouchId = null;
+          steerRaw = 0;
+          hideVis();
+        }
+      }
+
+      zoneEl.addEventListener('touchstart', onTouchStart, { passive: true });
+      // Listen on window for move/end so the finger can drift slightly off
+      // the original zone element without losing tracking.
+      window.addEventListener('touchmove', onTouchMove, { passive: true });
+      window.addEventListener('touchend', onTouchEnd, { passive: true });
+      window.addEventListener('touchcancel', onTouchEnd, { passive: true });
+
+      // ---- Keyboard fallback ----
+      const keys = { left: false, right: false };
+      window.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') keys.left = true;
+        if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') keys.right = true;
+      });
+      window.addEventListener('keyup', (e) => {
+        if (e.key === 'ArrowLeft' || e.key === 'a' || e.key === 'A') keys.left = false;
+        if (e.key === 'ArrowRight' || e.key === 'd' || e.key === 'D') keys.right = false;
+      });
+
+      // ---- Test-hook override (Section 12 / __pc wires this up) ----
+      let overrideInput = null; // {steer, drift, item} or null
+
+      function update(dt) {
+        // Keyboard contributes to steerRaw when no touch is active.
+        if (activeTouchId === null) {
+          const target = (keys.right ? 1 : 0) - (keys.left ? 1 : 0);
+          const rate = CONFIG.input.keyboardSteerRate;
+          if (target !== 0) {
+            steerRaw += Math.sign(target) * rate * dt;
+            steerRaw = Math.max(-1, Math.min(1, steerRaw));
+          } else if (!keys.left && !keys.right) {
+            // decay toward 0 when no key held and no touch
+            steerRaw -= Math.sign(steerRaw) * rate * dt;
+            if (Math.abs(steerRaw) < 0.01) steerRaw = 0;
+          }
+        }
+
+        const smoothing = CONFIG.input.smoothing;
+        const alpha = 1 - Math.exp(-smoothing * dt);
+        steerSmoothed += (steerRaw - steerSmoothed) * alpha;
+      }
+
+      function getFrame() {
+        if (overrideInput) return { ...overrideInput };
+        return { steer: steerSmoothed, drift: false, item: false };
+      }
+
+      function setOverride(frame) { overrideInput = { steer: 0, drift: false, item: false, ...frame }; }
+      function clearOverride() { overrideInput = null; }
+
+      return { update, getFrame, setOverride, clearOverride };
+    })();
+
+    // =========================================================================
+    // 4. PHYSICS
+    // =========================================================================
+    // Fixed 60Hz arcade model: auto-accelerate to top speed, steering yaw
+    // rate scaled by speed, grip blends velocity toward heading, soft
+    // bumpers keep the kart on track, and a ramp hop crosses the sink gap.
+    const Physics = (() => {
+      function makeKart(stats) {
+        return {
+          stats,
+          pos: new THREE.Vector3(0, 0, 22),  // world position (y = height incl. hop)
+          heading: Math.PI,                   // radians, 0 = +X ; set below to face track
+          speed: 0,                           // forward speed along heading (m/s)
+          velY: 0,                            // vertical velocity (ramp hop / gravity)
+          airborne: false,
+          rampArmed: true,                    // re-armed once kart leaves the trigger zone
+          s: 0,
+          lateral: 0,
+          groundY: 0,
+        };
+      }
+
+      // Orient the initial kart to face along the centerline tangent at s=0.
+      function resetKart(kart) {
+        const startSample = Track.sampleAtS(0);
+        kart.pos.set(startSample.point.x, 0, startSample.point.z);
+        kart.heading = Math.atan2(startSample.tangent.x, startSample.tangent.z);
+        kart.speed = 0;
+        kart.velY = 0;
+        kart.airborne = false;
+        kart.rampArmed = true;
+        kart.s = 0;
+        kart.lateral = 0;
+        kart.groundY = 0;
+      }
+
+      /** Advance one 1/60s physics tick. `input` = {steer,-1..1}. */
+      function step(kart, input, dt) {
+        const st = kart.stats;
+
+        // --- Auto-accelerate toward top speed ---
+        const speedFrac = st.topSpeed > 0 ? kart.speed / st.topSpeed : 0;
+        // Slightly reduce accel as we approach top speed for a natural feel.
+        const accelNow = st.accel * (1 - 0.6 * Math.max(0, speedFrac));
+        kart.speed += accelNow * dt;
+        kart.speed = Math.min(kart.speed, st.topSpeed);
+
+        // --- Steering: yaw rate scaled by speed (slow = tighter turning,
+        // near top speed = gentler turning), reduced further while airborne. ---
+        const speedForTurn = Math.min(1, kart.speed / Math.max(1e-3, st.topSpeed));
+        const turnRate = st.turnRateMax * (1 - speedForTurn * (1 - st.turnRateMinFactor));
+        const airborneFactor = kart.airborne ? 0.35 : 1.0;
+        kart.heading += input.steer * turnRate * airborneFactor * dt;
+
+        // --- Grip: in this simple arcade model velocity is always exactly
+        // speed-along-heading (no separate slip vector), so `st.grip` has
+        // no effect yet. It is read by AI/drift-adjacent code from Slice 3
+        // onward, which introduces an actual velocity-vs-heading split for
+        // drifting and slippery surfaces.
+
+        // --- Integrate horizontal position ---
+        const dx = Math.sin(kart.heading) * kart.speed * dt;
+        const dz = Math.cos(kart.heading) * kart.speed * dt;
+        kart.pos.x += dx;
+        kart.pos.z += dz;
+
+        // --- Track projection (drives soft walls + ramp trigger) ---
+        const proj = Track.project(kart.pos);
+        kart.s = proj.s;
+        kart.lateral = proj.lateral;
+
+        // --- Soft bumpers: once |lateral| exceeds half-width minus margin,
+        // bend the kart's heading back toward the track tangent (this is
+        // what "damps the outward velocity component" means in a model
+        // where velocity is just speed-along-heading) and nudge position
+        // toward the centerline. Forward speed is never reduced, so the
+        // kart always keeps moving — it slides along the wall rather than
+        // stopping. A hard clamp on position is the failsafe that makes
+        // leaving the track impossible even under sustained full-lock
+        // steering. ---
+        const halfW = proj.halfWidth;
+        const marginStart = halfW - CONFIG.track.wallMargin;
+        const absLat = Math.abs(kart.lateral);
+        if (absLat > marginStart) {
+          const penetration = Math.min(absLat - marginStart, CONFIG.track.wallMargin);
+          const t = penetration / CONFIG.track.wallMargin; // 0..1 how deep into the margin
+          const sign = Math.sign(kart.lateral);
+          const tangent = proj.tangent;
+          // Right-hand perpendicular matching the project() lateral sign
+          // convention (lateral = tangent.x*dz - tangent.z*dx), so that
+          // pos = point + right*lateral round-trips correctly.
+          const right = new THREE.Vector3(-tangent.z, 0, tangent.x);
+
+          // Bend heading toward the track tangent, proportional to penetration.
+          const tangentHeading = Math.atan2(tangent.x, tangent.z);
+          let diff = tangentHeading - kart.heading;
+          diff = ((diff + Math.PI) % (Math.PI * 2) + Math.PI * 2) % (Math.PI * 2) - Math.PI; // wrap to -PI..PI
+          const correctionAlpha = 1 - Math.exp(-CONFIG.track.wallHeadingCorrection * t * dt);
+          kart.heading += diff * correctionAlpha;
+
+          // Small position nudge back toward centerline.
+          const pushAmount = CONFIG.track.wallPushStrength * t * dt;
+          kart.pos.x -= right.x * sign * pushAmount;
+          kart.pos.z -= right.z * sign * pushAmount;
+        }
+
+        // Hard clamp (failsafe): never allow the kart to actually sit
+        // beyond half-width + a small tolerance, regardless of heading.
+        {
+          const proj2 = Track.project(kart.pos);
+          const absLat2 = Math.abs(proj2.lateral);
+          const maxLat = proj2.halfWidth + CONFIG.track.wallHardTolerance;
+          if (absLat2 > maxLat) {
+            const sign2 = Math.sign(proj2.lateral);
+            const right2 = new THREE.Vector3(-proj2.tangent.z, 0, proj2.tangent.x);
+            const excess = absLat2 - maxLat;
+            kart.pos.x -= right2.x * sign2 * excess;
+            kart.pos.z -= right2.z * sign2 * excess;
+          }
+          const proj3 = Track.project(kart.pos);
+          kart.s = proj3.s;
+          kart.lateral = proj3.lateral;
+        }
+
+        // --- Ramp hop over the sink gap ---
+        const nearRamp = Track.isNearRamp(kart.s);
+        if (nearRamp && kart.rampArmed && !kart.airborne) {
+          kart.velY = CONFIG.ramp.launchSpeed;
+          kart.airborne = true;
+          kart.rampArmed = false;
+        }
+        if (!nearRamp) kart.rampArmed = true;
+
+        if (kart.airborne) {
+          kart.velY += CONFIG.ramp.gravity * dt;
+          kart.groundY += kart.velY * dt;
+          if (kart.groundY <= 0) {
+            kart.groundY = 0;
+            kart.velY = 0;
+            kart.airborne = false;
+          }
+          kart.pos.y = kart.groundY;
+        } else {
+          kart.groundY = 0;
+          // While grounded, ride the static take-off ramp's slope (0
+          // everywhere except its approach) so the kart never visibly
+          // clips through the ramp mesh on the way up to the gap.
+          kart.pos.y = Track.rampApproachHeightAt(kart.s);
+        }
+      }
+
+      return { makeKart, resetKart, step };
+    })();
+
+    // =========================================================================
+    // 5. AI
+    // =========================================================================
+    // Slice 4 adds AI-driven karts that follow the centerline with lookahead
+    // steering and small mistakes; Slice 5 adds per-difficulty skill tuning.
+
+    // =========================================================================
+    // 6. ITEMS
+    // =========================================================================
+    // Slice 7 adds item boxes, the roulette pickup, and Paperclip / Sticky
+    // Note / Soap Bubble behavior; Slice 8 adds AI item usage.
+
+    // =========================================================================
+    // 7. RACE STATE
+    // =========================================================================
+    // Slice 2 adds countdown -> running -> finished state, lap counting from
+    // Track.project() plus checkpoints, and lap/race timers. For Slice 1 the
+    // kart simply drives freely as soon as the scene is ready.
+    const RaceState = (() => {
+      let paused = false; // Section 12 pauses physics while the test hook drives ticks
+      return {
+        get paused() { return paused; },
+        pause() { paused = true; },
+        resume() { paused = false; },
+      };
+    })();
+
+    // =========================================================================
+    // 8. RENDERING
+    // =========================================================================
+    // Three.js scene: warm kitchen lighting, low-poly counter props built in
+    // code, the track surface with visible edges, a low-poly kart, and a
+    // smooth chase camera.
+    const Rendering = (() => {
+      // `?lowfx=1` trims render cost for slower iPads: no shadows, pixel
+      // ratio capped at 1, and decorative-only geometry thinned or skipped.
+      const LOWFX = new URLSearchParams(location.search).get('lowfx') === '1';
+      // `?test=1`'s dev-only pixel-readback guards (Section 12's
+      // __pc.readPixel) need the drawing buffer preserved after
+      // presentation, or gl.readPixels can read stale/garbage data. Only
+      // set for test runs — it costs a little bandwidth the real game
+      // never pays.
+      const TEST_MODE = new URLSearchParams(location.search).get('test') === '1';
+
+      const canvas = document.getElementById('c');
+      const renderer = new THREE.WebGLRenderer({
+        canvas, antialias: true, powerPreference: 'high-performance',
+        preserveDrawingBuffer: TEST_MODE,
+      });
+      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, LOWFX ? 1 : CONFIG.render.pixelRatioCap));
+      renderer.shadowMap.enabled = !LOWFX;
+      renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+
+      const scene = new THREE.Scene();
+      scene.background = new THREE.Color(0xEDE0C8); // warm kitchen ambience fallback
+
+      const camera = new THREE.PerspectiveCamera(CONFIG.camera.fov, 1, 0.05, 500);
+
+      // ---- Lighting: warm kitchen key light + soft fill ----
+      const hemi = new THREE.HemisphereLight(0xfff3d6, 0x554433, 0.9);
+      scene.add(hemi);
+
+      const sun = new THREE.DirectionalLight(0xfff0c8, 1.15);
+      sun.position.set(30, 40, 20);
+      sun.castShadow = !LOWFX;
+      sun.shadow.mapSize.set(CONFIG.render.shadowMapSize, CONFIG.render.shadowMapSize);
+      sun.shadow.camera.left = -60;
+      sun.shadow.camera.right = 60;
+      sun.shadow.camera.top = 60;
+      sun.shadow.camera.bottom = -60;
+      sun.shadow.camera.far = 150;
+      sun.shadow.bias = -0.0015;
+      scene.add(sun);
+
+      const fill = new THREE.AmbientLight(0xffe9c0, 0.35);
+      scene.add(fill);
+
+      // ---- A track-aligned box helper, shared by the ramp, curb bumpers
+      // and the start/finish checkerboard. `pitchRad` tilts the box's local
+      // Z axis (its "length") up/down around its own width axis, so ramps
+      // can slope while everything stays yawed to match the track tangent
+      // at `sCenter`. `lateralOffset` shifts the box sideways (meters, +
+      // toward the project()/lateral "right" convention) off the centerline. ----
+      function trackAlignedBox(sCenter, size, colorHex, opts = {}) {
+        const { pitchRad = 0, lateralOffset = 0, yOffset = 0, roughness = 0.8, metalness = 0 } = opts;
+        const sample = Track.sampleAtS(sCenter);
+        const tangent = sample.tangent;
+        const right = new THREE.Vector3(-tangent.z, 0, tangent.x); // matches Track.project()'s lateral sign
+        const yaw = Math.atan2(tangent.x, tangent.z);
+
+        const geo = new THREE.BoxGeometry(size.x, size.y, size.z);
+        const mat = new THREE.MeshStandardMaterial({ color: colorHex, roughness, metalness });
+        const mesh = new THREE.Mesh(geo, mat);
+
+        const qYaw = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+        const qPitch = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -pitchRad);
+        mesh.quaternion.copy(qYaw.multiply(qPitch));
+
+        const pos = sample.point.clone().addScaledVector(right, lateralOffset);
+        mesh.position.set(pos.x, yOffset, pos.z);
+        return mesh;
+      }
+
+      // ---- Counter surface: light laminate/marble so the track (below)
+      // reads as a clearly different, driveable ribbon. ----
+      const counterMat = new THREE.MeshStandardMaterial({ color: 0xE7E2D6, roughness: 0.55 });
+      const counter = new THREE.Mesh(new THREE.PlaneGeometry(160, 140), counterMat);
+      counter.rotation.x = -Math.PI / 2;
+      counter.position.y = -0.05;
+      counter.receiveShadow = true;
+      scene.add(counter);
+
+      // ---- Track surface: a ribbon of quads following the centerline,
+      // built from the sampled table, with a gap left open at the sink. ----
+      const trackGroup = new THREE.Group();
+      scene.add(trackGroup);
+      const gapHalf = CONFIG.ramp.triggerHalfLength * CONFIG.ramp.gapHalfMultiplier;
+
+      function buildTrackMesh() {
+        const samples = Track.samples;
+        const rampS = Track.rampS;
+        const positions = [];
+        const indices = [];
+
+        // `pairCount` is the TOTAL number of (left,right) vertex pairs
+        // pushed into `positions` so far — it must never reset, even
+        // though the strip itself breaks at the sink gap. (An earlier
+        // version reset a single counter at the gap and reused it both to
+        // count pairs *and* to index them, which silently pointed every
+        // triangle after the gap back at the first run's vertices —
+        // rendering roughly half the loop as a hole down to the counter.)
+        let pairCount = 0;
+        let justBrokeRun = true; // true right after a gap: skip connecting to the previous (now-distant) run
+        for (let i = 0; i < samples.length; i++) {
+          const smp = samples[i];
+          // Skip the strip of samples that fall inside the sink gap; the
+          // ramp + landing pad (rendered separately) cover that area.
+          let d = Math.abs(smp.s - rampS);
+          d = Math.min(d, Track.length - d);
+          const inGap = d < gapHalf;
+
+          if (inGap) { justBrokeRun = true; continue; }
+
+          const tangent = smp.tangent;
+          const right = new THREE.Vector3(-tangent.z, 0, tangent.x);
+          const hw = CONFIG.track.halfWidthDefault;
+          const left = smp.point.clone().addScaledVector(right, -hw);
+          const rightP = smp.point.clone().addScaledVector(right, hw);
+
+          positions.push(left.x, 0.01, left.z, rightP.x, 0.01, rightP.z);
+          if (!justBrokeRun) {
+            const a = (pairCount - 1) * 2, b = pairCount * 2;
+            indices.push(a, a + 1, b, a + 1, b + 1, b);
+          }
+          pairCount++;
+          justBrokeRun = false;
+        }
+
+        const geo = new THREE.BufferGeometry();
+        geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+        geo.setIndex(indices);
+        geo.computeVertexNormals();
+        // A warm cutting-board tan, deliberately far from the pale counter
+        // color above so a child can see the driveable ribbon at a glance.
+        // DoubleSide is a defensive belt-and-suspenders: the strip's
+        // winding should already be consistent all the way around, but a
+        // one-sided material turns any future winding slip into an
+        // invisible hole instead of a visible glitch.
+        const mat = new THREE.MeshStandardMaterial({ color: 0xD8A650, roughness: 0.8, side: THREE.DoubleSide });
+        const mesh = new THREE.Mesh(geo, mat);
+        mesh.receiveShadow = true;
+        trackGroup.add(mesh);
+      }
+      buildTrackMesh();
+
+      // ---- Curb bumpers: chunky raised candy-stripe segments along both
+      // edges. These ARE the soft walls — bright red/white so a child can
+      // see exactly where the kart bounces back from. There are roughly
+      // 200 of them around the full loop, so they're drawn as two
+      // InstancedMesh objects (one red, one white) — 2 draw calls total
+      // instead of ~200 — rather than individual Mesh instances. ----
+      function buildCurbBumpers() {
+        const spacing = LOWFX ? 3.2 : 1.9;
+        const segLen = spacing * 0.92; // slight gap between segments reads as individual curb blocks
+        const bumpH = 0.3, bumpW = 0.42;
+        const hw = CONFIG.track.halfWidthDefault;
+
+        // First pass: collect the transform (position + yaw) for every
+        // curb segment on both sides of the track, sorted into red/white.
+        const redTransforms = [];
+        const whiteTransforms = [];
+        let segIndex = 0;
+        for (let s = 0; s < Track.length; s += spacing) {
+          let d = Math.abs(s - Track.rampS);
+          d = Math.min(d, Track.length - d);
+          if (d < gapHalf + segLen) { segIndex++; continue; } // no curb across the sink gap
+
+          const sample = Track.sampleAtS(s);
+          const tangent = sample.tangent;
+          const right = new THREE.Vector3(-tangent.z, 0, tangent.x);
+          const yaw = Math.atan2(tangent.x, tangent.z);
+          const quat = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), yaw);
+          const list = segIndex % 2 === 0 ? redTransforms : whiteTransforms;
+          for (const side of [-1, 1]) {
+            const pos = sample.point.clone().addScaledVector(right, side * (hw + bumpW * 0.5));
+            pos.y = bumpH / 2;
+            list.push({ pos, quat });
+          }
+          segIndex++;
+        }
+
+        const geo = new THREE.BoxGeometry(bumpW, bumpH, segLen);
+        const scratch = new THREE.Matrix4();
+        function buildInstanced(transforms, colorHex) {
+          if (transforms.length === 0) return;
+          const mat = new THREE.MeshStandardMaterial({ color: colorHex, roughness: 0.55 });
+          const mesh = new THREE.InstancedMesh(geo, mat, transforms.length);
+          transforms.forEach((t, idx) => {
+            scratch.compose(t.pos, t.quat, new THREE.Vector3(1, 1, 1));
+            mesh.setMatrixAt(idx, scratch);
+          });
+          mesh.instanceMatrix.needsUpdate = true;
+          mesh.castShadow = !LOWFX;
+          mesh.receiveShadow = true;
+          trackGroup.add(mesh);
+        }
+        buildInstanced(redTransforms, 0xE0483A);
+        buildInstanced(whiteTransforms, 0xF5F1E6);
+      }
+      buildCurbBumpers();
+
+      // ---- Checkered start/finish line at s=0, laid flat on the track. ----
+      function buildStartFinishLine() {
+        const hw = CONFIG.track.halfWidthDefault;
+        const cols = 8;
+        const squareW = (hw * 2) / cols;
+        const rowDepth = 0.5;
+        for (let row = 0; row < 2; row++) {
+          const sOffset = (row - 0.5) * rowDepth;
+          for (let col = 0; col < cols; col++) {
+            const lateral = (col + 0.5 - cols / 2) * squareW;
+            const dark = (row + col) % 2 === 0;
+            const square = trackAlignedBox(
+              sOffset, { x: squareW * 0.96, y: 0.03, z: rowDepth * 0.96 },
+              dark ? 0x222222 : 0xF5F1E6,
+              { lateralOffset: lateral, yOffset: 0.02, roughness: 0.6 }
+            );
+            trackGroup.add(square);
+          }
+        }
+      }
+      buildStartFinishLine();
+
+      // ---- Sink gap + jump ramp: a sloped take-off ramp rising in the
+      // direction of travel right up to the gap, a recessed steel basin
+      // with a little water and a drain underneath the gap, and a flat
+      // colored landing pad on the far side. All of it sits ON the track's
+      // centerline (not off to the side), aligned with the track tangent,
+      // and brackets exactly the s-range the physics ramp trigger uses. ----
+      function buildRamp() {
+        const hw = CONFIG.track.halfWidthDefault;
+        const r = CONFIG.ramp;
+
+        // Take-off ramp: flat ground at its back edge, rises to `riseHeight`
+        // right at the gap's edge, sloping upward along the direction of travel.
+        const takeoffFrontS = Track.rampS - gapHalf; // where the flat track ends
+        const takeoffBackS = takeoffFrontS - r.riseLength;
+        const takeoffMidS = (takeoffFrontS + takeoffBackS) / 2;
+        const pitchUp = Math.atan2(r.riseHeight, r.riseLength);
+        const takeoff = trackAlignedBox(
+          takeoffMidS, { x: hw * 1.98, y: 0.08, z: r.riseLength }, 0xB0762E,
+          { pitchRad: pitchUp, yOffset: r.riseHeight / 2, roughness: 0.7 }
+        );
+        takeoff.castShadow = true;
+        takeoff.receiveShadow = true;
+        trackGroup.add(takeoff);
+
+        // Landing pad: flat, just past the gap, colored to stand out as
+        // "you land here". Kart physics always lands at y=0, so no pitch.
+        const landingBackS = Track.rampS + gapHalf;
+        const landingMidS = landingBackS + r.landingPadLength / 2;
+        const landing = trackAlignedBox(
+          landingMidS, { x: hw * 1.98, y: 0.05, z: r.landingPadLength }, 0xC98A3E,
+          { yOffset: 0.025, roughness: 0.7 }
+        );
+        landing.castShadow = true;
+        landing.receiveShadow = true;
+        trackGroup.add(landing);
+
+        // Sink basin: recessed steel-gray box spanning the whole gap.
+        const basin = trackAlignedBox(
+          Track.rampS, { x: hw * 2.5, y: 0.5, z: gapHalf * 2.15 }, 0x8C97A0,
+          { yOffset: -0.27, roughness: 0.45, metalness: 0.35 }
+        );
+        basin.receiveShadow = true;
+        trackGroup.add(basin);
+
+        // Water sitting in the basin, a bit below the counter line.
+        const water = trackAlignedBox(
+          Track.rampS, { x: hw * 2.1, y: 0.03, z: gapHalf * 1.85 }, 0x2E7E9E,
+          { yOffset: -0.1, roughness: 0.25, metalness: 0.1 }
+        );
+        trackGroup.add(water);
+
+        // A small dark drain in the middle of the water.
+        const drainGeo = new THREE.CylinderGeometry(hw * 0.22, hw * 0.22, 0.03, 12);
+        const drainMat = new THREE.MeshStandardMaterial({ color: 0x1C2126, roughness: 0.5, metalness: 0.4 });
+        const drain = new THREE.Mesh(drainGeo, drainMat);
+        const drainSample = Track.sampleAtS(Track.rampS);
+        drain.position.set(drainSample.point.x, -0.08, drainSample.point.z);
+        trackGroup.add(drain);
+      }
+      buildRamp();
+
+      // ---- Tiled backsplash wall along the back edge of the counter.
+      // Positioned just beyond the loop's own bounding box (computed from
+      // the actual centerline samples, not guessed) on its far-Z side —
+      // the same side the kart starts on and initially faces — so it
+      // reads as scenery behind the track in normal driving views, not a
+      // wall off in empty space nothing ever looks at. Cheap: one plane +
+      // a grid of thin grout lines, no per-tile meshes. ----
+      function buildBacksplash() {
+        let minX = Infinity, maxX = -Infinity, maxZ = -Infinity;
+        for (const smp of Track.samples) {
+          minX = Math.min(minX, smp.point.x); maxX = Math.max(maxX, smp.point.x);
+          maxZ = Math.max(maxZ, smp.point.z);
+        }
+        const hw = CONFIG.track.halfWidthDefault;
+        const z = maxZ + hw + 3;               // just outside the curb on the far side
+        const xHalf = (maxX - minX) / 2 + 6;
+        const xCenter = (minX + maxX) / 2;
+        const height = 6, baseY = 0;
+
+        const wallMat = new THREE.MeshStandardMaterial({ color: 0xDCEEF2, roughness: 0.6 });
+        const wall = new THREE.Mesh(new THREE.PlaneGeometry(xHalf * 2, height), wallMat);
+        wall.position.set(xCenter, baseY + height / 2, z);
+        wall.receiveShadow = true;
+        scene.add(wall);
+
+        if (LOWFX) return; // grout lines are decorative only
+
+        const groutPts = [];
+        const tileSize = 1.6;
+        for (let x = xCenter - xHalf; x <= xCenter + xHalf; x += tileSize) {
+          groutPts.push(x, baseY, z - 0.02, x, baseY + height, z - 0.02);
+        }
+        for (let y = baseY; y <= baseY + height; y += tileSize) {
+          groutPts.push(xCenter - xHalf, y, z - 0.02, xCenter + xHalf, y, z - 0.02);
+        }
+        const groutGeo = new THREE.BufferGeometry();
+        groutGeo.setAttribute('position', new THREE.Float32BufferAttribute(groutPts, 3));
+        const groutMat = new THREE.LineBasicMaterial({ color: 0xB7CBCF, transparent: true, opacity: 0.6 });
+        scene.add(new THREE.LineSegments(groutGeo, groutMat));
+      }
+      buildBacksplash();
+
+      // ---- Low-poly props: salt & pepper shakers, fruit bowl. Left at
+      // full "kitchen object" size on purpose — the kart is what's tiny,
+      // so these read as giant landmarks beside the track. ----
+      function buildProps() {
+        const props = new THREE.Group();
+
+        function shaker(x, z, color) {
+          const g = new THREE.Group();
+          const body = new THREE.Mesh(
+            new THREE.CylinderGeometry(1.1, 1.1, 4.2, 10),
+            new THREE.MeshStandardMaterial({ color, roughness: 0.4, metalness: 0.1 })
+          );
+          body.position.y = 2.1;
+          body.castShadow = !LOWFX;
+          const cap = new THREE.Mesh(
+            new THREE.SphereGeometry(1.15, 10, 8),
+            new THREE.MeshStandardMaterial({ color: 0xCCCCCC, roughness: 0.3, metalness: 0.6 })
+          );
+          cap.position.y = 4.4;
+          cap.castShadow = !LOWFX;
+          g.add(body, cap);
+          g.position.set(x, 0, z);
+          return g;
+        }
+        props.add(shaker(20, -2, 0xF4F1E8));  // salt
+        props.add(shaker(23, -2, 0x3A3A3A));  // pepper
+
+        // Fruit bowl: a wide low cylinder with a few spheres on top.
+        const bowl = new THREE.Mesh(
+          new THREE.CylinderGeometry(4.5, 3.2, 1.8, 14),
+          new THREE.MeshStandardMaterial({ color: 0xD8D2C2, roughness: 0.5 })
+        );
+        bowl.position.set(-22, 0.9, -2);
+        bowl.castShadow = !LOWFX;
+        bowl.receiveShadow = true;
+        props.add(bowl);
+        const fruitColors = [0xE0483A, 0xF2C230, 0x7CB342];
+        const fruitCount = LOWFX ? 3 : 6;
+        for (let i = 0; i < fruitCount; i++) {
+          const fruit = new THREE.Mesh(
+            new THREE.SphereGeometry(1.05, 10, 8),
+            new THREE.MeshStandardMaterial({ color: fruitColors[i % fruitColors.length], roughness: 0.5 })
+          );
+          const ang = (i / fruitCount) * Math.PI * 2;
+          fruit.position.set(-22 + Math.cos(ang) * 2.2, 2.3, -2 + Math.sin(ang) * 1.6);
+          fruit.castShadow = !LOWFX;
+          props.add(fruit);
+        }
+
+        scene.add(props);
+      }
+      buildProps();
+
+      // ---- Kart mesh: simple low-poly body + wheels, built at a 2.6m
+      // reference length then uniformly scaled by CONFIG.kart.scale so it
+      // reads as a tiny kart against the full-size counter and props. ----
+      function buildKartMesh(color) {
+        const s = CONFIG.kart.scale;
+        const g = new THREE.Group();
+        const body = new THREE.Mesh(
+          new THREE.BoxGeometry(1.6 * s, 0.6 * s, 2.6 * s),
+          new THREE.MeshStandardMaterial({ color, roughness: 0.5 })
+        );
+        body.position.y = 0.55 * s;
+        body.castShadow = true;
+        g.add(body);
+
+        const cabin = new THREE.Mesh(
+          new THREE.BoxGeometry(1.0 * s, 0.5 * s, 1.1 * s),
+          new THREE.MeshStandardMaterial({ color: 0x2B2B2B, roughness: 0.6 })
+        );
+        cabin.position.set(0, 1.0 * s, -0.2 * s);
+        cabin.castShadow = true;
+        g.add(cabin);
+
+        const wheelGeo = new THREE.CylinderGeometry(0.42 * s, 0.42 * s, 0.36 * s, 10);
+        const wheelMat = new THREE.MeshStandardMaterial({ color: 0x1A1A1A, roughness: 0.8 });
+        const wheelPositions = [
+          [-0.95 * s, 0.42 * s, 0.9 * s], [0.95 * s, 0.42 * s, 0.9 * s],
+          [-0.95 * s, 0.42 * s, -0.9 * s], [0.95 * s, 0.42 * s, -0.9 * s],
+        ];
+        for (const [wx, wy, wz] of wheelPositions) {
+          const wheel = new THREE.Mesh(wheelGeo, wheelMat);
+          wheel.rotation.z = Math.PI / 2;
+          wheel.position.set(wx, wy, wz);
+          wheel.castShadow = true;
+          g.add(wheel);
+        }
+        // Tag every leaf mesh as "the kart" so the dev test hook's
+        // raycast-visibility check (Section 12) can tell a hit on the kart
+        // apart from a hit on the track, curbs or props.
+        g.traverse((obj) => { if (obj.isMesh) obj.userData.isKart = true; });
+        return g;
+      }
+      const kartMesh = buildKartMesh(0xE0483A);
+      scene.add(kartMesh);
+
+      // ---- Chase camera: pulled back and raised so the tiny kart reads
+      // at roughly 1/8-1/10 of the screen width, looking slightly ahead
+      // along the kart's heading so the next turn is visible. A debug
+      // top-down mode (Section 12's test hook) is also available for
+      // inspecting the whole track layout. ----
+      const camPos = new THREE.Vector3();
+      const camLook = new THREE.Vector3();
+      let camInit = false;
+      let debugCameraMode = 'chase'; // 'chase' | 'top'
+
+      function trackBounds() {
+        let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+        for (const smp of Track.samples) {
+          minX = Math.min(minX, smp.point.x); maxX = Math.max(maxX, smp.point.x);
+          minZ = Math.min(minZ, smp.point.z); maxZ = Math.max(maxZ, smp.point.z);
+        }
+        const pad = CONFIG.track.halfWidthDefault + 4;
+        return {
+          centerX: (minX + maxX) / 2, centerZ: (minZ + maxZ) / 2,
+          halfX: (maxX - minX) / 2 + pad, halfZ: (maxZ - minZ) / 2 + pad,
+        };
+      }
+
+      function updateCamera(kart, dt) {
+        if (debugCameraMode === 'top') {
+          const b = trackBounds();
+          const vFovHalf = THREE.MathUtils.degToRad(camera.fov) / 2;
+          const hNeeded = Math.max(b.halfZ, b.halfX / Math.max(camera.aspect, 0.01)) / Math.tan(vFovHalf);
+          camera.up.set(0, 0, -1);
+          camera.position.set(b.centerX, hNeeded * 1.15, b.centerZ);
+          camera.lookAt(b.centerX, 0, b.centerZ);
+          camInit = false; // force a clean re-init if we switch back to chase
+          return;
+        }
+        if (camera.up.y !== 1) camera.up.set(0, 1, 0);
+
+        const behind = new THREE.Vector3(-Math.sin(kart.heading), 0, -Math.cos(kart.heading));
+        const forward = new THREE.Vector3(Math.sin(kart.heading), 0, Math.cos(kart.heading));
+        const desiredPos = kart.pos.clone()
+          .addScaledVector(behind, CONFIG.camera.distance)
+          .add(new THREE.Vector3(0, CONFIG.camera.height + kart.pos.y, 0));
+        const desiredLook = kart.pos.clone()
+          .addScaledVector(forward, CONFIG.camera.lookAheadDistance)
+          .add(new THREE.Vector3(0, CONFIG.camera.lookHeight, 0));
+
+        if (!camInit) {
+          camPos.copy(desiredPos);
+          camLook.copy(desiredLook);
+          camInit = true;
+        } else {
+          const aPos = 1 - Math.exp(-CONFIG.camera.followLerp * dt);
+          const aLook = 1 - Math.exp(-CONFIG.camera.lookLerp * dt);
+          camPos.lerp(desiredPos, aPos);
+          camLook.lerp(desiredLook, aLook);
+        }
+        camera.position.copy(camPos);
+        camera.lookAt(camLook);
+      }
+
+      function setDebugCameraMode(mode) {
+        debugCameraMode = (mode === 'top') ? 'top' : 'chase';
+      }
+
+      function updateKartMesh(kart) {
+        kartMesh.position.set(kart.pos.x, kart.pos.y, kart.pos.z);
+        kartMesh.rotation.y = kart.heading;
+      }
+
+      function resize() {
+        const w = window.innerWidth, h = window.innerHeight;
+        renderer.setSize(w, h, false);
+        camera.aspect = w / h;
+        camera.updateProjectionMatrix();
+      }
+      window.addEventListener('resize', resize);
+      resize();
+
+      function render() {
+        renderer.render(scene, camera);
+      }
+
+      return { scene, camera, renderer, updateCamera, updateKartMesh, render, resize, setDebugCameraMode };
+    })();
+
+    // =========================================================================
+    // 9. HUD & MENUS
+    // =========================================================================
+    // Slice 5/6 add title/difficulty/character menus; Slice 2 adds countdown
+    // and lap HUD; Slice 7 adds the item button. For Slice 1 this section
+    // only owns the FPS counter and the portrait "rotate device" overlay.
+    const Hud = (() => {
+      const fpsEl = document.getElementById('fps');
+      const rotateEl = document.getElementById('rotate-overlay');
+      const debugMode = new URLSearchParams(location.search).get('debug') === '1';
+      if (debugMode) fpsEl.classList.add('visible');
+
+      let frames = 0, accum = 0, lastFps = 0;
+      function updateFps(dt) {
+        if (!debugMode) return;
+        frames++;
+        accum += dt;
+        if (accum >= 0.5) {
+          lastFps = Math.round(frames / accum);
+          fpsEl.textContent = lastFps + ' fps';
+          frames = 0; accum = 0;
+        }
+      }
+
+      function checkOrientation() {
+        const portrait = window.innerHeight > window.innerWidth;
+        rotateEl.classList.toggle('visible', portrait);
+      }
+      window.addEventListener('resize', checkOrientation);
+      window.addEventListener('orientationchange', checkOrientation);
+      checkOrientation();
+
+      return { updateFps, checkOrientation };
+    })();
+
+    // =========================================================================
+    // 10. AUDIO
+    // =========================================================================
+    // Slice 11 adds all Web Audio sound generation (engine hum, drift
+    // sizzle, boost whoosh, item/bump/splash sfx, countdown, fanfare, mute).
+
+    // =========================================================================
+    // 11. STORAGE
+    // =========================================================================
+    // Slice 10 adds versioned localStorage read/write for best times and the
+    // trophy shelf, with error handling so the game runs fine without it.
+
+    // =========================================================================
+    // 12. MAIN LOOP
+    // =========================================================================
+    // Fixed 60Hz physics via an accumulator, rendering tied to requestAnimationFrame.
+    // Also wires up the ?test=1 debug hook (window.__pc) used by dev-only tests.
+    (function main() {
+      // Prevent iOS Safari gestures (pinch-zoom, double-tap-zoom, long-press).
+      document.addEventListener('gesturestart', (e) => e.preventDefault());
+      document.addEventListener('gesturechange', (e) => e.preventDefault());
+      document.addEventListener('dblclick', (e) => e.preventDefault());
+      document.addEventListener('contextmenu', (e) => e.preventDefault());
+
+      const kart = Physics.makeKart({ ...CONFIG.defaultStats });
+      Physics.resetKart(kart);
+
+      const DT = 1 / CONFIG.physics.hz;
+      let accumulator = 0;
+      let lastTime = performance.now();
+      let rafId = null;
+      let loopRunning = true;
+
+      function tick(input) {
+        Input.update(DT);
+        Physics.step(kart, input, DT);
+      }
+
+      function frame(now) {
+        rafId = requestAnimationFrame(frame);
+        let dt = (now - lastTime) / 1000;
+        lastTime = now;
+        dt = Math.min(dt, 0.25); // clamp huge gaps (tab switch, etc.)
+
+        Hud.updateFps(dt);
+
+        if (!RaceState.paused) {
+          accumulator += dt;
+          let steps = 0;
+          while (accumulator >= DT && steps < CONFIG.physics.maxCatchUpSteps) {
+            const input = Input.getFrame();
+            tick(input);
+            accumulator -= DT;
+            steps++;
+          }
+        }
+
+        Rendering.updateKartMesh(kart);
+        Rendering.updateCamera(kart, dt);
+        Rendering.render();
+      }
+      rafId = requestAnimationFrame(frame);
+
+      // ---- Dev-only test hook, only when ?test=1 is present ----
+      const testMode = new URLSearchParams(location.search).get('test') === '1';
+      if (testMode) {
+        window.__pc = {
+          ready: true,
+          getState() {
+            return {
+              kart: {
+                x: kart.pos.x,
+                y: kart.pos.y,
+                z: kart.pos.z,
+                heading: kart.heading,
+                speed: kart.speed,
+                s: kart.s,
+                lateral: kart.lateral,
+                airborne: kart.airborne,
+              },
+              track: {
+                length: Track.length,
+                rampS: Track.rampS, // s-distance of the sink-gap ramp center, handy for dev screenshots
+                halfWidthAt(s) {
+                  const smp = Track.sampleAtS(s);
+                  return smp.halfWidth;
+                },
+                // World XZ of the centerline at s — used by the dev
+                // ribbon-color guard to know where on screen to sample.
+                centerlinePoint(s) {
+                  const smp = Track.sampleAtS(s);
+                  return { x: smp.point.x, z: smp.point.z };
+                },
+              },
+            };
+          },
+          setInput(frame) { Input.setOverride(frame); },
+          clearInput() { Input.clearOverride(); },
+          // The exact {steer, drift, item} object currently driving physics
+          // this tick — the live touch/keyboard-smoothed value, or the
+          // override set via setInput() if one is active.
+          getInput() { return Input.getFrame(); },
+          step(n) {
+            for (let i = 0; i < n; i++) {
+              const input = Input.getFrame();
+              tick(input);
+            }
+            Rendering.updateKartMesh(kart);
+          },
+          pause() { RaceState.pause(); },
+          resume() { RaceState.resume(); lastTime = performance.now(); },
+          resetKart() { Physics.resetKart(kart); },
+          // 'top' switches to a high overhead camera showing the whole
+          // track (for verifying layout/ramp placement); 'chase' restores
+          // the normal follow camera.
+          debugCamera(mode) { Rendering.setDebugCameraMode(mode); },
+          // ---- Dev-only visual-correctness helpers (used by the automated
+          // screenshot/pixel guards in tests/slice1.mjs, never by the game). ----
+          // World position -> CSS-pixel screen coordinates under the
+          // current camera. `behindCamera` is true when the point is
+          // behind the camera's near plane (screen coords meaningless then).
+          worldToScreen(x, y, z) {
+            const v = new THREE.Vector3(x, y, z).project(Rendering.camera);
+            const el = Rendering.renderer.domElement;
+            return {
+              x: (v.x * 0.5 + 0.5) * el.clientWidth,
+              y: (1 - (v.y * 0.5 + 0.5)) * el.clientHeight,
+              behindCamera: v.z > 1,
+            };
+          },
+          // Forces a fresh render, then reads back one pixel's RGBA (0-255)
+          // at CSS-pixel screen coordinates via gl.readPixels — this reads
+          // exactly what's on screen right now, not a decoded screenshot.
+          readPixel(screenX, screenY) {
+            Rendering.render();
+            const el = Rendering.renderer.domElement;
+            const gl = Rendering.renderer.getContext();
+            const glX = Math.round(screenX * (el.width / el.clientWidth));
+            const glY = el.height - Math.round(screenY * (el.height / el.clientHeight)) - 1;
+            const px = new Uint8Array(4);
+            gl.readPixels(glX, glY, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+            return [px[0], px[1], px[2], px[3]];
+          },
+          // Is the kart the first thing a ray from the camera through its
+          // own screen position hits? Confirms it's actually on screen and
+          // not occluded by (or clipped inside) another mesh.
+          raycastKart() {
+            const center = { x: kart.pos.x, y: kart.pos.y + 0.07, z: kart.pos.z };
+            const screen = this.worldToScreen(center.x, center.y, center.z);
+            const el = Rendering.renderer.domElement;
+            const onScreen = !screen.behindCamera
+              && screen.x >= 0 && screen.x <= el.clientWidth
+              && screen.y >= 0 && screen.y <= el.clientHeight;
+            let firstHitIsKart = false;
+            if (onScreen) {
+              const ndc = {
+                x: (screen.x / el.clientWidth) * 2 - 1,
+                y: -(screen.y / el.clientHeight) * 2 + 1,
+              };
+              const ray = new THREE.Raycaster();
+              ray.setFromCamera(ndc, Rendering.camera);
+              const hits = ray.intersectObjects(Rendering.scene.children, true);
+              firstHitIsKart = !!(hits[0] && hits[0].object && hits[0].object.userData.isKart);
+            }
+            return { onScreen, screenX: screen.x, screenY: screen.y, firstHitIsKart };
+          },
+          // renderer.info.render for the frame just drawn (draw calls,
+          // triangles) — the main iPad perf signal for this scene.
+          getRenderInfo() {
+            Rendering.render();
+            const r = Rendering.renderer.info.render;
+            return { calls: r.calls, triangles: r.triangles };
+          },
+        };
+      }
+    })();
+  </script>
+</body>
+</html>
